@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+.pio/
+__pycache__/
+*.o
+*.elf
+*.bin
+*.hex
+*.uf2
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / credentials
+.env
+credentials.json
