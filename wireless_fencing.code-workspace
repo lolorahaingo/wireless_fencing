@@ -1,0 +1,27 @@
+{
+	"folders": [
+		{
+			"name": "wireless_fencing",
+			"path": "."
+		},
+		{
+			"name": "phase0_1_freq_interrupt",
+			"path": "./phase0_1_freq_interrupt"
+		},
+		{
+			"name": "phase0_2_freq_detection",
+			"path": "./phase0_2_freq_detection"
+		},
+		{
+			"name": "phase0_3_mega_generator",
+			"path": "./phase0_3_no_common_gnd/mega_generator"
+		},
+		{
+			"name": "phase0_3_pico_receiver",
+			"path": "./phase0_3_no_common_gnd/pico_receiver"
+		}
+	],
+	"settings": {
+		"platformio.openAtProjectStart": true
+	}
+}
