@@ -15,21 +15,50 @@ permet d'identifier la nature de la touche sans connexion physique entre les tir
 
 ## Decouvertes & Validations Cles
 
-### Detection sans GND commun : VALIDEE (Phase 0.3)
+### Detection sans GND commun : VALIDEE (Phase 0.3 + 0.4)
 
-**Test realise** : Arduino Mega (adaptateur secteur) genere 20 kHz sur Pin 9,
-Raspberry Pi Pico W (USB sur Mac en mode batterie) detecte sur GPIO 2.
-Un seul fil entre les deux cartes, aucun GND commun, alimentations completement
-isolees (secteur vs batterie Mac).
+**Phase 0.3** (Mega 5V → Pico W) : Arduino Mega (adaptateur secteur) genere 20 kHz
+sur Pin 9, Pico W (USB sur Mac batterie) detecte sur GPIO 2. Un seul fil, aucun GND
+commun. Resultat : ~18500-19700 Hz detecte (~95% des fronts). Le signal 5V du Mega
+a assez d'amplitude pour franchir le seuil du GPIO recepteur.
 
-**Resultat** : Le Pico W detecte ~18500-19700 Hz de maniere fiable par comptage
-d'interruptions. Le signal traverse par couplage capacitif parasite sans chemin
-de retour physique. Classification correcte en "NEUTRE (20 kHz)".
+**Phase 0.4** (Pico W 3.3V → Pico W) : Deux Pico W, alimentations separees (secteur
+vs USB Mac). Resultat initial : seulement ~16 kHz detecte (~80% des fronts). Le signal
+3.3V est trop faible sans GND commun pour declencher tous les fronts montants.
+
+**Solution : resistance pull-down 10kΩ** sur le pin recepteur (entre GPIO 2 et GND
+du Pico recepteur). Cette resistance tire le pin vers le bas, augmentant l'excursion
+du signal couple et permettant au GPIO de detecter tous les fronts.
+
+**Resultat avec pull-down 10kΩ** : 20 020 Hz detecte — precision quasi parfaite,
+detection instantanee, equivalent au test avec GND commun.
+
+| Test | Signal | Sans pull-down | Avec pull-down 10kΩ |
+|------|--------|----------------|---------------------|
+| Mega 5V → Pico | 20 kHz | ~19 kHz (95%) | non teste |
+| Pico 3.3V → Pico | 20 kHz | ~16 kHz (80%) | **20 020 Hz (100%)** |
+| Pico 3.3V → Pico (GND commun) | 20 kHz | 20 000 Hz exact | - |
 
 **Implications** :
 - L'hypothese fondamentale du projet est validee
 - Le signal AC traverse un contact physique sans masse commune
+- Une resistance pull-down 10kΩ cote recepteur est NECESSAIRE pour le Pico 3.3V
 - Le couplage capacitif parasite suffit comme chemin de retour
+
+### Generation de signal sur Pico W : PWM hardware (pas tone())
+
+`tone()` sur le Pico W (framework Earlephilhower) est imprecis aux hautes frequences
+(~14-16 kHz au lieu de 20 kHz demande). Le **PWM hardware du RP2040** est exact :
+
+```
+Clock RP2040 = 125 MHz
+freq = 125000000 / wrap   (diviser = 1)
+20 kHz → wrap = 6250 → exact
+25 kHz → wrap = 5000 → exact
+40 kHz → wrap = 3125 → exact
+```
+
+Utiliser `hardware/pwm.h` avec `pwm_init()` au lieu de `tone()`.
 
 ### Methode de detection : Comptage par interruption (pas Goertzel)
 
@@ -42,18 +71,19 @@ et parfaitement adapte aux signaux carres.
 une fenetre temporelle (50 ms). La frequence = nombre_impulsions * (1000 / duree_ms).
 Classification par plage de tolerance (±2 kHz).
 
-### Frequences exactes pour le timer Arduino / Pico
+### Frequences exactes
 
-Les frequences doivent etre choisies pour produire un OCR entier sur le timer
-(prescaler 8 sur le Mega). Frequences inexactes = erreur de mesure.
+Les frequences doivent etre exactes sur les deux plateformes :
 
-| Frequence | Usage | OCR (Mega, prescaler 8) | Exacte ? |
-|-----------|-------|-------------------------|----------|
-| **20 000 Hz** | Freq_NEUTRE | 49 → 16M/(2*8*50) = 20000 | **Oui** |
-| **25 000 Hz** | Freq_VALID_A | 39 → 16M/(2*8*40) = 25000 | **Oui** |
-| **40 000 Hz** | Freq_VALID_B | 24 → 16M/(2*8*25) = 40000 | **Oui** |
-| ~~16 000 Hz~~ | ~~ancien NEUTRE~~ | 62 → 15873 Hz reel | **Non** |
-| ~~30 000 Hz~~ | ~~ancien VALID_A~~ | 32.3 → inexact | **Non** |
+| Frequence | Usage | Mega (prescaler 8) | Pico W (PWM hardware) |
+|-----------|-------|---------------------|-----------------------|
+| **20 000 Hz** | Freq_NEUTRE | OCR=49 → exact | wrap=6250 → exact |
+| **25 000 Hz** | Freq_VALID_A | OCR=39 → exact | wrap=5000 → exact |
+| **40 000 Hz** | Freq_VALID_B | OCR=24 → exact | wrap=3125 → exact |
+
+Sur le Mega : `tone(pin, freq)` fonctionne car le timer est precis.
+Sur le Pico W : utiliser le **PWM hardware** (`hardware/pwm.h`), pas `tone()`
+qui est imprecis aux hautes frequences (~14-16 kHz au lieu de 20 kHz).
 
 ### Materiel : Pico W (RP2040), pas Pico 2W (RP2350)
 
@@ -299,10 +329,12 @@ fronts montants (RISING) via interruption materielle sur un pin GPIO.
 
 **Principe** :
 1. Configurer le pin en INPUT avec `attachInterrupt(pin, callback, RISING)`
-2. L'ISR incremente un compteur a chaque front montant
-3. Toutes les 50 ms, lire le compteur et le remettre a zero (section atomique)
-4. Frequence = compteur * (1000 / duree_fenetre_ms)
-5. Classifier la frequence par plage de tolerance (±2 kHz)
+2. Ajouter une **resistance pull-down 10kΩ** entre le pin et GND (indispensable
+   pour la detection sans GND commun en 3.3V)
+3. L'ISR incremente un compteur a chaque front montant
+4. Toutes les 50 ms, lire le compteur et le remettre a zero (section atomique)
+5. Frequence = compteur * (1000 / duree_fenetre_ms)
+6. Classifier la frequence par plage de tolerance (±2 kHz)
 
 **Avantages** :
 - Extremement simple a implementer
@@ -381,37 +413,52 @@ Le couplage capacitif parasite suffit comme chemin de retour.
 
 **Checkpoint** : Hypothese fondamentale du projet VALIDEE — detection sans GND commun fonctionne.
 
-#### Phase 0.4 : Detection Pico → Pico (sans Arduino Mega) — A FAIRE
+#### Phase 0.4 : Detection Pico → Pico (sans Arduino Mega) — TERMINE
 **Plateforme** : 2x Raspberry Pi Pico W
-**Objectif** : Valider la generation ET la detection sur Pico W uniquement,
-sans Arduino Mega dans la boucle. Un Pico genere, l'autre detecte.
-Alimentations separees, un seul fil, pas de GND commun.
+**Objectif** : Valider la generation ET la detection sur Pico W uniquement.
+**Setup** : Pico generateur (adaptateur secteur) sur GPIO 15, Pico recepteur
+(USB Mac) sur GPIO 2. Un seul fil + resistance pull-down 10kΩ cote recepteur.
+**Code** : `phase0_4_pico_to_pico/pico_generator/` et `phase0_4_pico_to_pico/pico_receiver/`
 
-- **0.4.1** : Pico W #1 genere 20 kHz (tone() ou PWM hardware) sur un GPIO
-- **0.4.2** : Pico W #2 detecte par interruption sur un autre GPIO
-- **0.4.3** : Tester les 3 frequences (20/25/40 kHz)
-- **0.4.4** : Mesurer la stabilite et la precision de la detection
+**Decouvertes** :
+- `tone()` est imprecis sur le Pico W → utiliser PWM hardware (`hardware/pwm.h`)
+- Sans pull-down : seulement ~80% des fronts detectes (~16 kHz au lieu de 20 kHz)
+  avec montee progressive (capacites parasites qui se chargent)
+- Pull-down interne (INPUT_PULLDOWN, ~50kΩ) : insuffisant, meme resultat
+- **Pull-down externe 10kΩ** : detection parfaite (20 020 Hz), instantanee
 
-**Checkpoint** : Le systeme fonctionne entierement sur Pico W, sans Arduino Mega.
+**Circuit recepteur** :
+```
+GPIO 2 ──┬── fil signal vers generateur
+          │
+         [10kΩ]
+          │
+GND ──────┘
+```
+
+**Checkpoint** : Le systeme fonctionne entierement sur Pico W avec pull-down 10kΩ.
 
 ---
 
 ### Phase 1 : Detection via Fil de Corps + Fleuret
-**Plateforme** : Raspberry Pi Pico W (ou Arduino Mega si besoin des connecteurs)
+**Plateforme** : 2x Raspberry Pi Pico W
 **Objectif** : Valider le chemin complet du signal a travers l'equipement reel
+**Prerequis** : Pull-down 10kΩ sur le pin de detection (valide en Phase 0.4),
+PWM hardware pour la generation de signal.
 
-- **1.1** : Connecter le signal AC sur la ligne C (coque) via le connecteur
-- **1.2** : Brancher le fleuret + fil de corps au Pico via les connecteurs
-- **1.3** : Lire la ligne B sur un pin GPIO : verifier la detection du bouton
-         (B-C ferme au repos → signal C present sur B ; bouton presse → signal disparu)
-- **1.4** : Lire la ligne B sur un pin GPIO (interruption) : quand le bouton est presse
-         et que la pointe touche une surface avec frequence, verifier la detection
-- **1.5** : Connecter un second signal (Freq_VALID) sur le lame/cuirasse (ligne A)
+- **1.1** : Pico generateur genere 20 kHz (PWM hardware) sur un GPIO connecte
+         a une surface conductrice (feuille alu, cuirasse, ou lame)
+- **1.2** : Brancher le fleuret + fil de corps au Pico recepteur via les connecteurs
+- **1.3** : Toucher la surface conductrice avec la pointe du fleuret (bouton presse)
+         et verifier que le Pico recepteur detecte la frequence sur la ligne B
+- **1.4** : Tester avec la cuirasse reelle comme surface emettrice
+- **1.5** : Tester la detection du bouton (B-C ferme au repos, ouvert quand presse)
+- **1.6** : Connecter un second signal (Freq_VALID) sur la cuirasse (ligne A)
          et verifier que le comptage distingue Freq_VALID de Freq_NEUTRE
-- **1.6** : Mesurer le rapport signal/bruit, ajuster amplitude/frequence si necessaire
+- **1.7** : Mesurer le rapport signal/bruit a travers le fil de corps complet
 
-**Checkpoint** : Le signal traverse proprement l'equipement, le bouton est detecte,
-et les frequences sont distinguees
+**Checkpoint** : Le signal traverse proprement l'equipement d'escrime, le bouton
+est detecte, et les frequences sont distinguees a travers le fil de corps
 
 ---
 
@@ -419,7 +466,7 @@ et les frequences sont distinguees
 **Plateforme** : Raspberry Pi Pico W
 **Objectif** : Faire tourner le systeme complet sur le Pico
 
-- **2.1** : Generation de signal sur le Pico (PWM hardware ou tone())
+- **2.1** : Generation de signal sur le Pico (PWM hardware, pas tone())
          Pin 1 → Freq_NEUTRE (20 kHz) sur ligne C
          Pin 2 → Freq_VALID sur ligne A
 - **2.2** : Detection bouton sur Pin 3 (GPIO, lecture ligne B <-> C)
@@ -504,7 +551,7 @@ et les frequences sont distinguees
 | Bruit electrique parasite                 | Moyen     | Comptage par interruption est robuste au bruit       |
 | Latence WiFi trop elevee                  | Moyen     | UDP brut sans overhead HTTP ; mesurer en Phase 3     |
 | Interference entre les 2 frequences       | Moyen     | Frequences suffisamment espacees (20/25/40 kHz)     |
-| Signal trop faible pour declencher interruption | Moyen | Ajouter un Schmitt trigger en entree               |
+| Signal trop faible pour declencher interruption | RESOLU | Pull-down 10kΩ sur le pin recepteur (valide en Phase 0.4) |
 
 ---
 
@@ -512,16 +559,20 @@ et les frequences sont distinguees
 
 1. **Methode de detection** : Comptage d'impulsions par interruption (RISING)
    - Goertzel/FFT ecartes : inadaptes aux signaux carres, surcharge inutile
-2. **Communication** : WiFi UDP brut (pas ESP-NOW, incompatible Pico W)
-3. **Topologie WiFi** : Le central est Access Point, les tireurs sont clients
-4. **Frequences** : 3 frequences exactes (20 kHz, 25 kHz, 40 kHz)
-5. **Freq_NEUTRE** : identique pour les deux coques de fleuret ET la piste
-6. **Approche incrementale** : valider la detection de frequence AVANT tout le reste
-7. **Detection bouton** : pin GPIO dedie (pas via analyse de frequence sur B)
-8. **Separation des fonctions** : 4 pins par Pico avec roles clairement separes
-   - 2 pins PWM en sortie (generation Freq_NEUTRE + Freq_VALID)
-   - 1 pin GPIO en entree (detection bouton)
-   - 1 pin GPIO en entree (detection frequence par interruption)
+2. **Generation de signal** : PWM hardware du RP2040 (`hardware/pwm.h`)
+   - `tone()` ecarte sur Pico W : imprecis aux hautes frequences
+3. **Pull-down 10kΩ** sur le pin de detection (indispensable sans GND commun en 3.3V)
+   - Pull-down interne (~50kΩ) insuffisant
+4. **Communication** : WiFi UDP brut (pas ESP-NOW, incompatible Pico W)
+5. **Topologie WiFi** : Le central est Access Point, les tireurs sont clients
+6. **Frequences** : 3 frequences exactes (20 kHz, 25 kHz, 40 kHz)
+7. **Freq_NEUTRE** : identique pour les deux coques de fleuret ET la piste
+8. **Approche incrementale** : valider la detection de frequence AVANT tout le reste
+9. **Detection bouton** : pin GPIO dedie (pas via analyse de frequence sur B)
+10. **Separation des fonctions** : 4 pins par Pico avec roles clairement separes
+    - 2 pins PWM en sortie (generation Freq_NEUTRE + Freq_VALID)
+    - 1 pin GPIO en entree (detection bouton)
+    - 1 pin GPIO en entree + pull-down 10kΩ (detection frequence par interruption)
 
 ---
 
@@ -623,7 +674,7 @@ Fil de corps :          Pico :                    Connecte a :
 | Phase 0.1 | Detection sur meme carte (Mega)               | TERMINE     |
 | Phase 0.2 | Multi-frequences sur meme carte (Mega)        | TERMINE     |
 | Phase 0.3 | Detection sans GND commun (Mega → Pico W)     | TERMINE     |
-| Phase 0.4 | Detection Pico → Pico (sans Mega)             | A faire     |
+| Phase 0.4 | Detection Pico → Pico (sans Mega)             | TERMINE     |
 | Phase 1   | Detection via fil de corps + fleuret           | A faire     |
 | Phase 2   | Systeme complet sur Pico W                     | A faire     |
 | Phase 3   | Communication WiFi UDP                         | A faire     |

@@ -19,6 +19,14 @@
 		{
 			"name": "phase0_3_pico_receiver",
 			"path": "./phase0_3_no_common_gnd/pico_receiver"
+		},
+		{
+			"name": "phase0_4_pico_generator",
+			"path": "./phase0_4_pico_to_pico/pico_generator"
+		},
+		{
+			"name": "phase0_4_pico_receiver",
+			"path": "./phase0_4_pico_to_pico/pico_receiver"
 		}
 	],
 	"settings": {
