@@ -5,6 +5,10 @@
 			"path": "."
 		},
 		{
+			"name": "gpio_test",
+			"path": "./gpio_test"
+		},
+		{
 			"name": "phase0_1_freq_interrupt",
 			"path": "./phase0_1_freq_interrupt"
 		},
