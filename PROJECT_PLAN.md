@@ -103,6 +103,43 @@ a travers la cuirasse posee sur un siege, via fleuret + fil de corps.
 - 10kΩ : insuffisant — signal 20-50 Hz cote drain (front montant trop lent)
 - **100Ω : fonctionne** — 20 kHz detecte parfaitement
 
+### Couplage parasite B↔C dans le fleuret : DECOUVERTE CRITIQUE (Phase 1.5)
+
+**Probleme** : Quand on genere Freq_NEUTRE (20 kHz) sur la ligne C (coque/bati)
+via le buffer MOSFET, le signal **fuit vers la ligne B** par couplage capacitif
+parasite a l'interieur du fleuret. Les lignes B et C courent a quelques millimetres
+l'une de l'autre dans la rainure de la lame, formant un condensateur parasite.
+
+**Test Phase 1.5** : GP14 genere 20 kHz sur ligne C (MOSFET + pull-up 100Ω).
+GP2 mesure la frequence sur ligne B. Resultat : **GP2 detecte ~20 000 Hz en
+permanence**, meme bouton presse, meme pointe en l'air ne touchant rien.
+
+Le signal 5V / 50 mA du buffer MOSFET est suffisamment puissant pour traverser
+la capacite parasite interne B↔C du fleuret.
+
+**Consequences** :
+- On ne peut PAS emettre sur la ligne C et detecter proprement sur la ligne B
+  en meme temps — les signaux se perturbent
+- L'approche initiale (filtre RC sur GP16 pour detecter le bouton via
+  presence/absence du 20 kHz sur B) est **invalidee** : le 20 kHz est
+  toujours present sur B par couplage, que le bouton soit ferme ou ouvert
+- L'architecture a 4 pins (2 PWM sortie + 2 GPIO entree) doit etre revue
+
+**Solution retenue** : Architecture a 3 pins avec deux variantes incrementales :
+
+- **Option 2 (fondation)** : Pas de signal sur la ligne C. La ligne C sert
+  uniquement a la detection du bouton par lecture DC. Pas de couplage parasite,
+  detection propre sur GP2. Sacrifice : la coque n'emet pas Freq_NEUTRE
+  (touche sur coque = blanche au lieu de "pas de lumiere").
+
+- **Option 3 (amelioration)** : Time-division sur la ligne C. Le meme pin
+  (GP16) alterne entre emission PWM (9 ms) et lecture DC du bouton (1 ms).
+  Quand le bouton est detecte comme presse, le PWM est coupe et on bascule
+  en detection de frequence pure sur GP2. La coque emet 90% du temps →
+  ~18 kHz apparent pour le recepteur adverse (dans la tolerance ±2 kHz de NEUTRE).
+
+Voir la section "Architecture par Tireur" pour les details.
+
 ### Generation de signal sur Pico W : PWM hardware (pas tone())
 
 `tone()` sur le Pico W (framework Earlephilhower) est imprecis aux hautes frequences
@@ -219,107 +256,139 @@ PlatformIO :
 
 ## Adaptation Sans Fil — Architecture par Tireur
 
-### Principe : 4 pins fonctionnels par Pico
+### Principe : 3 pins fonctionnels par Pico
 
-Chaque Pico utilise les 3 lignes du fil de corps (A, B, C) plus un pin dedie
-pour la detection du bouton. Les fonctions sont clairement separees :
+Chaque Pico utilise les 3 lignes du fil de corps avec une correspondance 1:1.
+La contrainte cle est que les lignes B et C ne peuvent pas etre utilisees
+simultanement en emission et en detection (couplage parasite B↔C dans le fleuret).
 
-| Pin Pico    | Ligne fil de corps | Direction  | Fonction                               |
-|-------------|--------------------|------------|----------------------------------------|
-| Pin 1 (PWM) | C (vert)          | SORTIE     | Generation Freq_NEUTRE sur bati/coque  |
-| Pin 2 (PWM) | A (rouge)         | SORTIE     | Generation Freq_VALID sur lame/cuirasse|
-| Pin 3 (GPIO)| B <-> C           | ENTREE     | Detection bouton (circuit ouvert/ferme)|
-| Pin 4 (GPIO)| B (bleu)          | ENTREE     | Detection frequence par interruption   |
+| Pin Pico (GPIO) | Ligne fil de corps | Fonction                               |
+|------------------|--------------------|----------------------------------------|
+| GP14 (PWM)       | A (rouge)          | Generation Freq_VALID sur cuirasse     |
+| GP2  (GPIO IN)   | B (bleu)           | Detection frequence par interruption   |
+| GP16 (GPIO IN)   | C (vert)           | Detection bouton par lecture DC         |
 
-### Detail de chaque pin
+### Option 2 — Architecture de base (pas d'emission sur C)
 
-**Pin 1 — Generation Freq_NEUTRE (ligne C / vert) — SORTIE PWM**
-- Genere un signal carre a 20 kHz sur la ligne C
-- Ce signal se propage sur le bati du fleuret (coque + lame de l'arme)
-- Meme frequence que la piste metallique (quand disponible)
-- But : toute surface "neutre" (coque, piste) porte cette frequence
+C'est l'architecture de travail actuelle. La ligne C ne porte aucun signal,
+elle sert uniquement a detecter l'etat du bouton par lecture DC.
 
-**Pin 2 — Generation Freq_VALID (ligne A / rouge) — SORTIE PWM**
+**GP14 — Generation Freq_VALID (ligne A / rouge) — SORTIE PWM**
 - Genere un signal carre a Freq_VALID (unique par tireur) sur la ligne A
-- La ligne A est connectee au lame/cuirasse du tireur
+- La ligne A est connectee a la cuirasse du tireur (via MOSFET buffer)
 - Freq_VALID_A = 25 kHz, Freq_VALID_B = 40 kHz
 - But : identifier une touche sur la surface valable de CE tireur
 
-**Pin 3 — Detection bouton (dedie) — ENTREE GPIO**
-- Pin dedie a la detection de l'etat du bouton-poussoir
-- Au repos : B est relie a C (bouton ferme) → etat connu
-- Bouton presse : B <-> C rompu → changement d'etat detecte
-- Lecture numerique simple (digitalRead), instantanee (~microsecondes)
-
-**Pin 4 — Detection frequence (ligne B / bleu) — ENTREE GPIO (interruption)**
+**GP2 — Detection frequence (ligne B / bleu) — ENTREE GPIO (interruption)**
 - Detecte le signal qui arrive sur la pointe du fleuret via la ligne B
-- N'est analyse que QUAND le bouton est presse (Pin 3)
+- N'est analyse que QUAND le bouton est presse (GP16)
 - Comptage d'impulsions par interruption (RISING) sur une fenetre de 50 ms
+- Pull-down 10kΩ entre GP2 et GND (indispensable sans GND commun)
 - Classification par plage de frequence (±2 kHz) :
   - Freq_VALID adverse → touche valide
-  - Freq_NEUTRE → pas de lumiere (piste ou coque)
   - Aucune frequence → touche non-valide (blanche)
 
-### Sequence de detection (boucle principale)
+**GP16 — Detection bouton (ligne C / vert) — ENTREE GPIO (INPUT_PULLUP)**
+- Connecte a la ligne C du fil de corps
+- Exploite le fait que le couplage capacitif parasite **bloque le DC**
+  tandis que le bouton mecanique **laisse passer le DC**
+- Au repos (bouton ferme, B↔C connectes) : GP16 est tire vers LOW par
+  la pull-down 10kΩ de GP2 (via le chemin C → bouton → B → pull-down)
+  Tension : 3.3V × 10kΩ / (50kΩ + 10kΩ) ≈ 0.55V → LOW
+- Bouton presse (B↔C ouvert) : GP16 flotte, tire vers HIGH par la
+  pull-up interne (~50kΩ vers 3.3V) → HIGH
+- Lecture par digitalRead(), instantanee
+
+**Limitation de l'option 2** : la coque du fleuret n'emet pas Freq_NEUTRE.
+Si la pointe adverse touche la coque, elle ne detecte aucune frequence →
+touche blanche au lieu de "pas de lumiere". Acceptable pour le prototype.
+
+### Option 3 — Architecture amelioree (time-division sur C)
+
+Evolution logicielle de l'option 2, **meme cablage**. GP16 alterne entre
+deux modes grace a `gpio_set_function()` du RP2040 :
+
+```
+Phase EMIT   (9 ms) : GP16 en PWM → emet Freq_NEUTRE (20 kHz) sur ligne C
+Phase DETECT (1 ms) : GP16 en INPUT_PULLUP → lit l'etat DC du bouton
+
+Si bouton detecte comme presse → BASCULE EN MODE FULL DETECT :
+  GP16 reste en INPUT (PWM coupe)
+  GP2 compte la frequence en continu (pas de pollution de C)
+  Jusqu'au relachement du bouton
+  → Reprendre le cycle EMIT/DETECT normal
+```
+
+**Avantages** :
+- La coque emet 90% du temps → recepteur adverse voit ~18 kHz (dans ±2 kHz de NEUTRE) ✅
+- Quand le bouton est presse, le PWM est coupe → GP2 propre, pas de couplage ✅
+- Latence detection bouton : max 9 ms (compatible avec dwell time FIE de 15 ms) ✅
+- GP16 est sur PWM slice 0 channel A, GP14 sur slice 7 channel A → pas de conflit ✅
+
+**Note** : Pendant que le bouton est presse (mode FULL DETECT), la coque n'emet
+plus. C'est acceptable car a cet instant le tireur est en train de toucher
+quelque chose — c'est l'adversaire qui est concerne, pas la coque de ce tireur.
+
+### Sequence de detection (boucle principale — Option 2)
 
 ```
 BOUCLE PRINCIPALE (chaque Pico tireur) :
 
-1. Lire Pin 3 (GPIO) : le bouton est-il presse ?
+1. Lire GP16 (digitalRead) : le bouton est-il presse ?
    |
-   +-- NON → rien, retour debut boucle
+   +-- NON (GP16 = LOW) → rien, retour debut boucle
    |
-   +-- OUI → passer a l'etape 2
+   +-- OUI (GP16 = HIGH) → passer a l'etape 2
 
-2. Lire Pin 4 (GPIO interruption) : quelle frequence arrive sur la pointe ?
+2. Compter les impulsions sur GP2 (interruption RISING, fenetre 50 ms) :
    |
    +-- Comptage detecte Freq_VALID adverse → TOUCHE VALIDE
    |   Envoyer {player_id, VALID, timestamp, dwell} au central via WiFi
    |
-   +-- Comptage detecte Freq_NEUTRE → PAS DE LUMIERE
-   |   (ou ne rien envoyer, selon le choix d'implementation)
-   |
-   +-- Comptage ne detecte rien → TOUCHE NON-VALIDE
+   +-- Comptage ne detecte rien → TOUCHE NON-VALIDE (blanche)
        Envoyer {player_id, INVALID, timestamp, dwell} au central via WiFi
 ```
 
 ### Schema du flux electrique
 
 ```
+CIRCUIT (Option 2 — pas d'emission sur C) :
+
+  GP14 (PWM) --[MOSFET buffer]--> Ligne A --> Cuirasse (Freq_VALID)
+
+  GP2  (GPIO IN) <-- [10kΩ pull-down] --> GND
+       ^
+       |
+  Ligne B <-- Pointe du fleuret
+
+  GP16 (INPUT_PULLUP, ~50kΩ vers 3.3V)
+       ^
+       |
+  Ligne C <-- Bati/Coque du fleuret
+
+
 ETAT REPOS (bouton non presse) :
 
-  Pin 1 (PWM) --[Freq_NEUTRE]--> Ligne C --> Bati/Coque
-                                                  |
-                                          [bouton FERME]
-                                                  |
-  Pin 4 (GPIO) <-------- Ligne B <---------- Pointe
-  Pin 3 (GPIO) : detecte circuit B-C ferme → "bouton NON presse"
+  GP16 ← Ligne C ←[bouton FERME]→ Ligne B → [10kΩ pull-down] → GND
+  → GP16 tire vers LOW (0.55V) → bouton NON presse
 
-  → Le Pico sait que le bouton n'est pas presse. Pas d'analyse.
+  GP2 voit rien (pas de signal sur B, pas d'emission sur C)
 
 
 ETAT TOUCHE (bouton presse) :
 
-  Pin 1 (PWM) --[Freq_NEUTRE]--> Ligne C --> Bati/Coque
-                                                  |
-                                          [bouton OUVERT] ← rupture
-                                                  |
-  Pin 3 (GPIO) : detecte circuit B-C ouvert → "bouton PRESSE"
+  GP16 ← Ligne C    [bouton OUVERT]    Ligne B → GP2
+  → GP16 tire vers HIGH (3.3V via pull-up interne) → bouton PRESSE
 
-  La pointe du fleuret touche une surface externe :
-
-  Pin 2 adv. --[Freq_VALID_adv]--> Lame adverse --> Pointe --> Ligne B --> Pin 4 (GPIO)
+  La pointe du fleuret touche la cuirasse adverse :
+  GP14 adv. --[Freq_VALID_adv]--> Cuirasse adv. --> Pointe --> Ligne B --> GP2
   → Comptage detecte Freq_VALID adverse → TOUCHE VALIDE
 
   OU
 
-  Pin 1 adv. --[Freq_NEUTRE]--> Coque adverse --> Pointe --> Ligne B --> Pin 4 (GPIO)
-  → Comptage detecte Freq_NEUTRE → PAS DE LUMIERE
-
-  OU
-
-  Surface non conductrice --> Pointe --> Ligne B --> Pin 4 (GPIO)
-  → Comptage ne detecte rien → TOUCHE BLANCHE
+  La pointe ne touche rien de conducteur :
+  Ligne B --> GP2 : aucune impulsion
+  → TOUCHE BLANCHE (non-valide)
 ```
 
 ---
@@ -332,14 +401,12 @@ TIREUR A                                          TIREUR B
 |  Pico W (A)          |                          |  Pico W (B)          |
 |                      |                          |                      |
 |  GENERE:             |                          |  GENERE:             |
-|  Pin1: Freq_NEUTRE   |                          |  Pin1: Freq_NEUTRE   |
-|    (20kHz) → coque A |                          |    (20kHz) → coque B |
-|  Pin2: Freq_VALID_A  |                          |  Pin2: Freq_VALID_B  |
+|  GP14: Freq_VALID_A  |                          |  GP14: Freq_VALID_B  |
 |    (25kHz) → lame A  |                          |    (40kHz) → lame B  |
 |                      |                          |                      |
 |  DETECTE:            |                          |  DETECTE:            |
-|  Pin3: bouton (GPIO) |                          |  Pin3: bouton (GPIO) |
-|  Pin4: freq (GPIO    |         WiFi UDP         |  Pin4: freq (GPIO    |
+|  GP16: bouton (DC)   |                          |  GP16: bouton (DC)   |
+|  GP2: freq (GPIO     |         WiFi UDP         |  GP2: freq (GPIO     |
 |    interruption)     |<------------------------>|    interruption)     |
 +----------+-----------+                          +----------+-----------+
            |                                                  |
@@ -357,19 +424,30 @@ TIREUR A                                          TIREUR B
 
 ### Frequences
 
-- **Freq_NEUTRE** (20 kHz) : frequence commune generee sur les coques des
-  fleurets (ligne C) des DEUX tireurs, et sur la piste metallique (plus tard).
-  Detecter cette frequence = annuler la touche (pas de lumiere).
 - **Freq_VALID_A** (25 kHz) : frequence unique du tireur A, generee sur
-  sa cuirasse/lame (ligne A). Si le fleuret de B detecte cette frequence,
+  sa cuirasse (ligne A). Si le fleuret de B detecte cette frequence,
   c'est une touche valide de B sur A.
 - **Freq_VALID_B** (40 kHz) : frequence unique du tireur B, generee sur
-  sa cuirasse/lame (ligne A). Si le fleuret de A detecte cette frequence,
+  sa cuirasse (ligne A). Si le fleuret de A detecte cette frequence,
   c'est une touche valide de A sur B.
+- **Freq_NEUTRE** (20 kHz) : frequence reservee pour les surfaces neutres.
+  Non emise en Option 2. En Option 3, emise sur la coque (ligne C) par
+  time-division (90% du temps). Sera aussi utilisee sur la piste metallique
+  (quand disponible).
 
 ### Logique de Detection (tableau de verite)
 
-| Bouton presse ? | Frequence sur Pin 4 (GPIO) | Resultat                              |
+**Option 2 (architecture de base)** :
+
+| Bouton presse ? | Frequence sur GP2          | Resultat                              |
+|-----------------|----------------------------|---------------------------------------|
+| Non             | (non lu)                   | Rien (pas de touche)                  |
+| Oui             | Freq_VALID adverse         | **Touche valide** (lumiere coloree)   |
+| Oui             | Aucune frequence           | **Touche non-valide** (lumiere blanche)|
+
+**Option 3 (avec time-division, amelioration future)** :
+
+| Bouton presse ? | Frequence sur GP2          | Resultat                              |
 |-----------------|----------------------------|---------------------------------------|
 | Non             | (non lu)                   | Rien (pas de touche)                  |
 | Oui             | Freq_VALID adverse         | **Touche valide** (lumiere coloree)   |
@@ -512,31 +590,47 @@ PWM hardware pour la generation de signal, buffer MOSFET 2N7000 + pull-up 100Ω.
          Note : le signal est detecte meme bouton non presse (normal, voir 1.5)
 - **1.4** : Tester avec la cuirasse reelle comme surface emettrice — **TERMINE**
          GPIO direct : echec (5-7 kHz). Buffer MOSFET 2N7000 + pull-up 100Ω : **20 kHz** ✅
-- **1.5** : Tester la detection du bouton (B-C ferme au repos, ouvert quand presse) — A faire
-         Observation : GP2 detecte le signal meme bouton non presse car la pointe
-         (ligne B) est toujours connectee a GP2. Le bouton relie B a C au repos
-         mais ne bloque pas le signal entrant. La detection du bouton doit se faire
-         via un pin GPIO dedie (GP20) qui lit l'etat B↔C explicitement.
-- **1.6** : Connecter un second signal (Freq_VALID) sur la cuirasse (ligne A)
-         et verifier que le comptage distingue Freq_VALID de Freq_NEUTRE — A faire
-- **1.7** : Mesurer le rapport signal/bruit a travers le fil de corps complet — A faire
+- **1.5** : Tester la detection du bouton — **ECHEC de l'approche RC, DECOUVERTE CRITIQUE**
+         Test initial : filtre RC (10kΩ + 100nF) sur GP16 pour lisser le 20 kHz
+         de la ligne C et detecter le bouton par presence/absence de signal sur B.
+         Resultat : GP16 reste LOW en permanence (tension DC lissee trop faible).
+         De plus, GP2 detecte ~20 kHz meme bouton presse et pointe en l'air →
+         **couplage capacitif parasite B↔C** a l'interieur du fleuret. Le signal
+         5V/50mA du buffer MOSFET sur C fuit vers B par la capacite parasite
+         entre les deux lignes qui courent cote a cote dans la lame.
+         → Approche RC **abandonnee**. Architecture revue : pas d'emission sur C
+         (Option 2), detection du bouton par lecture DC sur la ligne C.
+         Voir section "Couplage parasite B↔C" et "Architecture par Tireur".
+         **Code** : `phase1_5_button_detect/` (code du test RC, obsolete)
+- **1.6** : Tester la detection du bouton par lecture DC sur GP16 (Option 2) — A faire
+         GP16 en INPUT_PULLUP connecte a la ligne C. Pas d'emission sur C.
+         Bouton ferme → GP16 tire vers LOW (via pull-down 10kΩ de GP2 sur B).
+         Bouton presse → GP16 tire vers HIGH (pull-up interne).
+- **1.7** : Tester la detection de frequence propre sur GP2 (sans emission sur C) — A faire
+         Verifier que GP2 ne voit aucun signal au repos (pas de couplage parasite)
+         et detecte correctement Freq_VALID quand la pointe touche la cuirasse.
+- **1.8** : Connecter Freq_VALID sur la cuirasse (ligne A via MOSFET buffer)
+         et verifier la boucle complete : bouton presse → detection freq → classification — A faire
 
 **Checkpoint** : Le signal traverse proprement l'equipement d'escrime, le bouton
-est detecte, et les frequences sont distinguees a travers le fil de corps
+est detecte par lecture DC, et Freq_VALID est identifiee a travers le fil de corps
 
 ---
 
-### Phase 2 : Systeme complet sur Pico W + Multi-frequences
+### Phase 2 : Systeme complet sur Pico W (Option 2 → Option 3)
 **Plateforme** : Raspberry Pi Pico W
 **Objectif** : Faire tourner le systeme complet sur le Pico
 
-- **2.1** : Generation de signal sur le Pico (PWM hardware, pas tone())
-         Pin 1 → Freq_NEUTRE (20 kHz) sur ligne C
-         Pin 2 → Freq_VALID sur ligne A
-- **2.2** : Detection bouton sur Pin 3 (GPIO, lecture ligne B <-> C)
-- **2.3** : Detection frequence sur Pin 4 (GPIO interruption, ligne B)
+- **2.1** : Generation Freq_VALID sur le Pico (PWM hardware)
+         GP14 → Freq_VALID sur ligne A (via MOSFET buffer vers cuirasse)
+- **2.2** : Detection bouton sur GP16 (INPUT_PULLUP, lecture DC ligne C)
+- **2.3** : Detection frequence sur GP2 (GPIO interruption RISING, ligne B)
 - **2.4** : Valider la boucle complete : bouton → comptage → identification
-- **2.5** : Tester avec le materiel reel (cuirasse + coque fleuret + fleuret)
+- **2.5** : Tester avec le materiel reel (cuirasse + fleuret)
+- **2.6** : Implementer le time-division sur GP16 (Option 3) :
+         GP16 alterne entre PWM (Freq_NEUTRE, 9 ms) et INPUT_PULLUP (bouton, 1 ms).
+         Bascule en mode FULL DETECT quand bouton presse (PWM coupe).
+- **2.7** : Valider que le recepteur adverse voit ~18 kHz sur la coque (Option 3)
 
 **Checkpoint** : Le Pico detecte le bouton et distingue les frequences a travers l'equipement
 
@@ -572,10 +666,11 @@ est detecte, et les frequences sont distinguees a travers le fil de corps
 ### Phase 5 : Integration Complete 2 Tireurs
 **Objectif** : Deux tireurs complets face a face
 
-- Chaque Pico genere Freq_NEUTRE sur sa coque (Pin 1 → ligne C)
-- Chaque Pico genere Freq_VALID sur sa cuirasse (Pin 2 → ligne A)
-- Chaque Pico detecte le bouton (Pin 3 → GPIO)
-- Chaque Pico detecte la frequence au bout du fleuret (Pin 4 → GPIO interruption)
+- Chaque Pico genere Freq_VALID sur sa cuirasse (GP14 PWM → ligne A via MOSFET)
+- Chaque Pico detecte le bouton par lecture DC (GP16 INPUT_PULLUP → ligne C)
+- Chaque Pico detecte la frequence au bout du fleuret (GP2 interruption → ligne B)
+- Si Option 3 implementee : chaque Pico emet Freq_NEUTRE sur sa coque par
+  time-division (GP16 alterne PWM/INPUT)
 - Les evenements remontent au central en WiFi UDP
 - Le central arbitre et allume les lumieres
 
@@ -614,10 +709,12 @@ est detecte, et les frequences sont distinguees a travers le fil de corps
 |-------------------------------------------|-----------|-----------------------------------------------------|
 | Signal trop attenue a travers le lame     | Bloquant  | Augmenter amplitude (ampli-op) ou baisser frequence |
 | GPIO ne peut pas driver la cuirasse (charge capacitive) | **RESOLU** | Buffer 2N7000 + pull-up 100Ω vers VBUS 5V — valide en Phase 1 |
+| Couplage capacitif parasite B↔C dans le fleuret | **RESOLU** | Ne pas emettre sur C et detecter sur B en meme temps. Option 2 : pas d'emission sur C. Option 3 : time-division avec bascule en full detect quand bouton presse. Decouvert en Phase 1.5. |
 | Bruit electrique parasite                 | Moyen     | Comptage par interruption est robuste au bruit       |
 | Latence WiFi trop elevee                  | Moyen     | UDP brut sans overhead HTTP ; mesurer en Phase 3     |
 | Interference entre les 2 frequences       | Moyen     | Frequences suffisamment espacees (20/25/40 kHz)     |
-| Signal trop faible pour declencher interruption | RESOLU | Pull-down 10kΩ sur le pin recepteur (valide en Phase 0.4) |
+| Signal trop faible pour declencher interruption | **RESOLU** | Pull-down 10kΩ sur le pin recepteur (valide en Phase 0.4) |
+| Detection bouton par DC : niveaux de tension insuffisants | Moyen | Pull-up interne (50kΩ) vs pull-down externe (10kΩ) donne 0.55V (LOW) vs 3.3V (HIGH). A valider en Phase 1.6. Si insuffisant : pull-up externe ou ADC. |
 
 ---
 
@@ -632,19 +729,27 @@ est detecte, et les frequences sont distinguees a travers le fil de corps
 4. **Communication** : WiFi UDP brut (pas ESP-NOW, incompatible Pico W)
 5. **Topologie WiFi** : Le central est Access Point, les tireurs sont clients
 6. **Frequences** : 3 frequences exactes (20 kHz, 25 kHz, 40 kHz)
-7. **Freq_NEUTRE** : identique pour les deux coques de fleuret ET la piste
+7. **Freq_NEUTRE** : reservee pour les surfaces neutres (coque, piste).
+   Non emise en Option 2. Emise par time-division en Option 3.
 8. **Approche incrementale** : valider la detection de frequence AVANT tout le reste
-9. **Detection bouton** : pin GPIO dedie (pas via analyse de frequence sur B)
-10. **Separation des fonctions** : 4 pins par Pico avec roles clairement separes
-    - 2 pins PWM en sortie (generation Freq_NEUTRE + Freq_VALID)
-    - 1 pin GPIO en entree (detection bouton)
-    - 1 pin GPIO en entree + pull-down 10kΩ (detection frequence par interruption)
+9. **Detection bouton** : lecture DC sur la ligne C via GP16 (INPUT_PULLUP).
+   Le couplage capacitif parasite bloque le DC, le bouton mecanique le laisse
+   passer. Approche par filtre RC **abandonnee** (Phase 1.5).
+10. **Separation des fonctions** : 3 pins par Pico, correspondance 1:1 avec les lignes
+    - GP14 (PWM sortie) → ligne A → Freq_VALID sur cuirasse (via MOSFET buffer)
+    - GP2 (GPIO entree + pull-down 10kΩ) → ligne B → detection frequence (interruption)
+    - GP16 (GPIO entree INPUT_PULLUP) → ligne C → detection bouton (DC)
+    En Option 3, GP16 alterne entre PWM (emission) et INPUT (detection bouton)
 11. **Buffer de courant** : MOSFET 2N7000 + pull-up **100Ω** vers VBUS (5V) sur
-    les pins de sortie PWM qui drivent la cuirasse et la coque. Pull-up 10kΩ
+    le pin de sortie PWM qui drive la cuirasse (ligne A). Pull-up 10kΩ
     insuffisante (front montant trop lent). 100Ω fournit ~50 mA, suffisant pour
     charger/decharger la capacitance parasite a 20 kHz. Valide en Phase 1.
     Le signal est inverse (GPIO HIGH → Drain a GND, GPIO LOW → Drain a 5V)
     mais sans impact sur la detection par comptage de fronts.
+12. **Pas d'emission et detection simultanees sur B et C** : le couplage capacitif
+    parasite entre les lignes B et C a l'interieur du fleuret rend impossible
+    l'emission sur C et la detection sur B en meme temps. Decouvert en Phase 1.5.
+    Solution : Option 2 (pas d'emission sur C) ou Option 3 (time-division).
 
 ---
 
@@ -677,9 +782,16 @@ Le bouton-poussoir a la pointe du fleuret est de type **normalement ferme** :
 - Au repos : ligne B connectee a ligne C (circuit ferme)
 - Bouton presse : ligne B deconnectee de ligne C (circuit ouvert)
 
-La detection du bouton se fait via un **pin GPIO dedie** (Pin 3) qui lit
-l'etat du circuit B <-> C. Quand le circuit s'ouvre, le Pico sait que le
-bouton est presse et lance le comptage de frequence sur Pin 4.
+La detection du bouton se fait par **lecture DC sur GP16** (connecte a la ligne C,
+configure en INPUT_PULLUP). Le couplage capacitif parasite entre B et C bloque
+le DC mais laisse passer l'AC — le bouton mecanique fait l'inverse (laisse
+passer le DC). On exploite cette difference :
+- Bouton ferme : GP16 tire vers LOW par la pull-down 10kΩ de GP2 (via B)
+- Bouton presse : GP16 tire vers HIGH par la pull-up interne (~50kΩ)
+
+**Approche abandonnee** : filtre RC (10kΩ + 100nF) pour lisser le 20 kHz
+et detecter le bouton par presence/absence de signal. Invalidee par le
+couplage parasite B↔C (le signal est toujours present, meme bouton ouvert).
 
 ### Piste Metallique (Sujet Separe)
 La piste metallique n'est pas disponible pour les tests actuels. Elle sera traitee
@@ -690,7 +802,8 @@ fleuret annule la touche (pas de lumiere).
 ### Coque du Fleuret vs Cuirasse
 - La **coque** (garde) du fleuret est la partie metallique qui protege la main.
   Elle fait partie du **bati** de l'arme, connecte a la ligne C.
-  → Porte **Freq_NEUTRE** (touche annulee si detectee, comme la piste)
+  → En Option 2 : ne porte aucun signal (ligne C = detection bouton uniquement)
+  → En Option 3 : porte **Freq_NEUTRE** par time-division (90% du temps)
 - La **cuirasse** (lame) est le gilet conducteur qui couvre la surface valable.
   Connectee a la ligne A.
   → Porte **Freq_VALID** (touche valide si detectee par l'adversaire)
@@ -700,11 +813,13 @@ fleuret annule la touche (pas de lumiere).
 ```
 Fil de corps :          Pico :                    Connecte a :
 +--------+              +----------+              +------------------+
-| A (rouge) |---------->| Pin 2 (PWM) |---------->| Lame/Cuirasse    |
-| B (bleu)  |---------->| Pin 4 (GPIO)|           | Pointe fleuret   |
-| C (vert)  |---------->| Pin 1 (PWM) |---------->| Bati/Coque       |
-| B<->C     |---------->| Pin 3 (GPIO)|           | Bouton (NF)      |
+| A (rouge) |---------->| GP14 (PWM)  |---------->| Cuirasse         |
+| B (bleu)  |---------->| GP2  (GPIO) |           | Pointe fleuret   |
+| C (vert)  |---------->| GP16 (GPIO) |           | Bati/Coque       |
 +--------+              +----------+              +------------------+
+
+Option 2 : GP14 = PWM out, GP2 = interrupt in, GP16 = digitalRead in
+Option 3 : GP14 = PWM out, GP2 = interrupt in, GP16 = alterne PWM/digitalRead
 ```
 
 ### Pinout Pico W (reference rapide)
@@ -747,8 +862,8 @@ Fil de corps :          Pico :                    Connecte a :
 | Phase 0.2 | Multi-frequences sur meme carte (Mega)        | TERMINE     |
 | Phase 0.3 | Detection sans GND commun (Mega → Pico W)     | TERMINE     |
 | Phase 0.4 | Detection Pico → Pico (sans Mega)             | TERMINE     |
-| Phase 1   | Detection via fil de corps + fleuret           | EN COURS — buffer MOSFET valide, detection cuirasse OK, reste bouton + multi-freq |
-| Phase 2   | Systeme complet sur Pico W                     | A faire     |
+| Phase 1   | Detection via fil de corps + fleuret           | EN COURS — buffer MOSFET valide, detection cuirasse OK, couplage parasite B↔C decouvert, architecture revue (Option 2/3), reste detection bouton DC + freq propre |
+| Phase 2   | Systeme complet sur Pico W (Option 2 → 3)     | A faire     |
 | Phase 3   | Communication WiFi UDP                         | A faire     |
 | Phase 4   | Logique d'arbitrage                            | A faire     |
 | Phase 5   | Integration complete 2 tireurs                 | A faire     |
