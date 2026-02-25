@@ -35,7 +35,7 @@ const unsigned int FREQ_VALID_B = 40000;  // 40 kHz exact
 const unsigned int TOLERANCE    = 2000;   // ±2 kHz
 
 // --- Périodes de mesure et d'affichage ---
-const unsigned int MEASURE_PERIOD  = 5;   // ms — fenêtre de comptage
+const unsigned int MEASURE_PERIOD  = 10;   // ms — fenêtre de comptage
 const unsigned int DISPLAY_PERIOD  = 500;  // ms — rafraîchissement Serial
 
 // --- Variables partagées avec l'ISR ---

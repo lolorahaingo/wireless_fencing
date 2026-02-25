@@ -45,67 +45,63 @@ detection instantanee, equivalent au test avec GND commun.
 - Une resistance pull-down 10kΩ cote recepteur est NECESSAIRE pour le Pico 3.3V
 - Le couplage capacitif parasite suffit comme chemin de retour
 
-### Charge capacitive de la cuirasse : PROBLEME IDENTIFIE (Phase 1 — tests preliminaires)
+### Charge capacitive de la cuirasse : RESOLU (Phase 1)
 
-**Montage** : Pico generateur (PWM 20 kHz) → fil de corps → pince croco → cuirasse.
-Pico recepteur (GPIO + pull-down 10kΩ) → fil de corps → fiche fleuret → touche la cuirasse.
-
-**Test 1** — Pince croco ↔ fiche fleuret en contact direct (sans cuirasse) :
-→ **20 kHz detecte** ✅ — le signal traverse les fils de corps sans probleme.
-
-**Test 2** — Pince croco sur cuirasse, fiche touche cuirasse (cuirasse posee sur siege plastique) :
-→ **5-7 kHz detecte, fluctuant** ❌ — le recepteur rate ~2 fronts sur 3.
-Rapprocher les deux points de contact sur la cuirasse n'ameliore presque pas le resultat.
-
-**Test 3** — Meme montage, cuirasse suspendue en l'air (aucun contact avec une surface) :
-→ **10-19 kHz detecte, fluctuant** — nette amelioration mais toujours instable.
-La resistance DC de la cuirasse est < 1 ohm (pas un probleme de resistance).
-
-**Diagnostic** : Le GPIO du Pico (3.3V, ~12 mA max) ne peut pas driver la charge
+**Probleme** : Le GPIO du Pico (3.3V, ~12 mA max) ne peut pas driver la charge
 capacitive de la cuirasse a 20 kHz. La cuirasse est une grande surface conductrice
-qui forme un condensateur parasite avec tout ce qui l'entoure (siege, sol, et surtout
-le corps du tireur en conditions reelles). A chaque front du signal carre, le GPIO
-doit charger/decharger cette capacitance. Il n'y arrive pas assez vite → le signal
-carre devient arrondi/mou → le recepteur ne detecte qu'une fraction des fronts montants.
+qui forme un condensateur parasite avec tout ce qui l'entoure (siege, sol, corps).
 
-**Preuves** :
-- Cuirasse sur siege : ~5-7 kHz (forte capacitance parasite vers le siege/sol)
-- Cuirasse en l'air : ~10-19 kHz (capacitance reduite mais surface propre toujours presente)
-- Sans cuirasse (fil direct) : 20 kHz exact (aucune charge capacitive)
-- Le signal detecte est fluctuant, pas une frequence stable → fronts rates aleatoirement
+**Tests sans buffer (GPIO direct)** :
 
-**Impact** : BLOQUANT pour la Phase 1. En conditions reelles (cuirasse portee sur
-le corps humain), le probleme sera encore pire car le corps est un excellent plan
-de masse capacitif.
+| Test | Resultat |
+|------|----------|
+| Pince croco ↔ fiche directe (sans cuirasse) | 20 kHz exact ✅ |
+| Cuirasse posee sur siege plastique | 5-7 kHz fluctuant ❌ |
+| Cuirasse suspendue en l'air | 10-19 kHz fluctuant ❌ |
 
-**Solution identifiee** : Buffer de courant (transistor MOSFET ou NPN) entre le GPIO
-et la cuirasse. Le GPIO pilote la grille/base (quasi zero courant), le transistor
-fournit le courant necessaire pour charger/decharger la capacitance a 20 kHz.
+**Solution : MOSFET 2N7000 + pull-up 100Ω vers VBUS (5V)**
+
+La pull-up 10kΩ initialement prevue etait trop elevee — le courant (0.5 mA) ne
+suffisait pas a recharger la capacitance parasite entre chaque front. Avec 100Ω
+(50 mA max), les fronts montants sont assez rapides pour 20 kHz.
 
 ```
-AVANT (ne fonctionne pas) :
-  GPIO Pico (3.3V, ~12mA) ──────────────────> cuirasse (charge capacitive)
+Circuit buffer valide :
 
-APRES (avec buffer) :
-  GPIO Pico (3.3V) ──> grille MOSFET ──> cuirasse
-                              │
-                        alimente par 3.3V ou VBUS (5V)
-                        courant >> 12mA
+        VBUS (5V)
+            │
+         [100Ω]  pull-up (10kΩ trop faible, 100Ω necessaire)
+            │
+            ├──────── vers cuirasse (fil de corps, ligne A ou C)
+            │
+        Drain (D)
+            │
+  GPIO ──[100Ω]── Gate (G)    2N7000 (MOSFET N-channel)
+            │
+        Source (S)
+            │
+          GND Pico
 ```
 
-**Options de transistors** :
-- MOSFET N-channel : 2N7000, BS170, IRLZ44N (ideal, commutation rapide)
-- Transistor NPN : 2N2222, BC547, BC337 (fonctionne aussi)
-- Utiliser VBUS (5V, pin 40 du Pico) au lieu de 3.3V doublerait l'amplitude
-  en plus du courant, doublement benefique.
+**Tests avec buffer MOSFET + pull-up 100Ω (cuirasse sur siege)** :
 
-**Alternatives moins preferables** :
-- Baisser la frequence (ex: 5 kHz) — reduit le probleme capacitif mais impacte
-  le temps de detection et la separation des frequences
-- Augmenter l'amplitude seule (level shifter 5V) — aide mais ne resout pas
-  le probleme de courant fondamental
+Detection via fleuret + fil de corps touchant la cuirasse :
+- **20 000 - 20 200 Hz** sur la majorite des mesures → detection parfaite ✅
+- Quelques mesures a 0 Hz → perte de contact physique (normal pour test a la main)
+- Quelques mesures aberrantes (12 kHz, 24 kHz) → transitions de contact
+  (etablissement/rupture pendant la fenetre de mesure)
+- Le signal est detecte meme **bouton non presse** → comportement normal car
+  B est connecte a la pointe en permanence, le bouton (normalement ferme) relie
+  B a C mais ne bloque pas le signal vers GP2. La logique de filtrage par l'etat
+  du bouton (GP20) est necessaire cote software.
 
-**Statut** : En attente de test avec buffer de courant.
+**Resultat** : Le buffer MOSFET 2N7000 + pull-up 100Ω vers VBUS resout
+completement le probleme de charge capacitive. Detection fiable a 20 kHz
+a travers la cuirasse posee sur un siege, via fleuret + fil de corps.
+
+**Historique des pull-up testees** :
+- 10kΩ : insuffisant — signal 20-50 Hz cote drain (front montant trop lent)
+- **100Ω : fonctionne** — 20 kHz detecte parfaitement
 
 ### Generation de signal sur Pico W : PWM hardware (pas tone())
 
@@ -502,22 +498,28 @@ GND ──────┘
 
 ---
 
-### Phase 1 : Detection via Fil de Corps + Fleuret
+### Phase 1 : Detection via Fil de Corps + Fleuret — EN COURS
 **Plateforme** : 2x Raspberry Pi Pico W
 **Objectif** : Valider le chemin complet du signal a travers l'equipement reel
 **Prerequis** : Pull-down 10kΩ sur le pin de detection (valide en Phase 0.4),
-PWM hardware pour la generation de signal.
+PWM hardware pour la generation de signal, buffer MOSFET 2N7000 + pull-up 100Ω.
 
 - **1.1** : Pico generateur genere 20 kHz (PWM hardware) sur un GPIO connecte
-         a une surface conductrice (feuille alu, cuirasse, ou lame)
-- **1.2** : Brancher le fleuret + fil de corps au Pico recepteur via les connecteurs
-- **1.3** : Toucher la surface conductrice avec la pointe du fleuret (bouton presse)
-         et verifier que le Pico recepteur detecte la frequence sur la ligne B
-- **1.4** : Tester avec la cuirasse reelle comme surface emettrice
-- **1.5** : Tester la detection du bouton (B-C ferme au repos, ouvert quand presse)
+         a une surface conductrice (feuille alu, cuirasse, ou lame) — **TERMINE**
+- **1.2** : Brancher le fleuret + fil de corps au Pico recepteur via les connecteurs — **TERMINE**
+- **1.3** : Toucher la surface conductrice avec la pointe du fleuret
+         et verifier que le Pico recepteur detecte la frequence sur la ligne B — **TERMINE**
+         Note : le signal est detecte meme bouton non presse (normal, voir 1.5)
+- **1.4** : Tester avec la cuirasse reelle comme surface emettrice — **TERMINE**
+         GPIO direct : echec (5-7 kHz). Buffer MOSFET 2N7000 + pull-up 100Ω : **20 kHz** ✅
+- **1.5** : Tester la detection du bouton (B-C ferme au repos, ouvert quand presse) — A faire
+         Observation : GP2 detecte le signal meme bouton non presse car la pointe
+         (ligne B) est toujours connectee a GP2. Le bouton relie B a C au repos
+         mais ne bloque pas le signal entrant. La detection du bouton doit se faire
+         via un pin GPIO dedie (GP20) qui lit l'etat B↔C explicitement.
 - **1.6** : Connecter un second signal (Freq_VALID) sur la cuirasse (ligne A)
-         et verifier que le comptage distingue Freq_VALID de Freq_NEUTRE
-- **1.7** : Mesurer le rapport signal/bruit a travers le fil de corps complet
+         et verifier que le comptage distingue Freq_VALID de Freq_NEUTRE — A faire
+- **1.7** : Mesurer le rapport signal/bruit a travers le fil de corps complet — A faire
 
 **Checkpoint** : Le signal traverse proprement l'equipement d'escrime, le bouton
 est detecte, et les frequences sont distinguees a travers le fil de corps
@@ -602,7 +604,7 @@ est detecte, et les frequences sont distinguees a travers le fil de corps
 | Batteries LiPo 3.7V + chargeur   | Alimentation portee            | ~10 EUR x2   |
 | Condensateurs 100nF, 10uF        | Filtrage des signaux           | ~2 EUR       |
 | Resistances (1k, 10k, 100k ohms) | Diviseurs de tension, pull-ups | ~2 EUR       |
-| Transistor MOSFET (2N7000/BS170) ou NPN (2N2222/BC547) | **Buffer de courant pour driver la cuirasse** (NECESSAIRE) | ~1 EUR |
+| Transistor MOSFET 2N7000 + resistance 100Ω pull-up | **Buffer de courant pour driver la cuirasse** (VALIDE) | ~1 EUR |
 
 ---
 
@@ -611,7 +613,7 @@ est detecte, et les frequences sont distinguees a travers le fil de corps
 | Risque                                    | Impact    | Mitigation                                          |
 |-------------------------------------------|-----------|-----------------------------------------------------|
 | Signal trop attenue a travers le lame     | Bloquant  | Augmenter amplitude (ampli-op) ou baisser frequence |
-| GPIO ne peut pas driver la cuirasse (charge capacitive) | **CONFIRME** | Buffer de courant (MOSFET/NPN) entre GPIO et cuirasse — voir section "Charge capacitive de la cuirasse" |
+| GPIO ne peut pas driver la cuirasse (charge capacitive) | **RESOLU** | Buffer 2N7000 + pull-up 100Ω vers VBUS 5V — valide en Phase 1 |
 | Bruit electrique parasite                 | Moyen     | Comptage par interruption est robuste au bruit       |
 | Latence WiFi trop elevee                  | Moyen     | UDP brut sans overhead HTTP ; mesurer en Phase 3     |
 | Interference entre les 2 frequences       | Moyen     | Frequences suffisamment espacees (20/25/40 kHz)     |
@@ -637,12 +639,12 @@ est detecte, et les frequences sont distinguees a travers le fil de corps
     - 2 pins PWM en sortie (generation Freq_NEUTRE + Freq_VALID)
     - 1 pin GPIO en entree (detection bouton)
     - 1 pin GPIO en entree + pull-down 10kΩ (detection frequence par interruption)
-11. **Buffer de courant** : NECESSAIRE sur les pins de sortie PWM qui driveront
-    la cuirasse (et potentiellement la coque). Le GPIO du Pico (3.3V, ~12mA) ne peut
-    pas charger/decharger la capacitance parasite d'une grande surface conductrice
-    a 20 kHz. Un transistor MOSFET ou NPN est requis entre le GPIO et la surface.
-    Confirme par tests Phase 1 (cuirasse sur siege : 5-7 kHz, en l'air : 10-19 kHz,
-    fil direct : 20 kHz exact).
+11. **Buffer de courant** : MOSFET 2N7000 + pull-up **100Ω** vers VBUS (5V) sur
+    les pins de sortie PWM qui drivent la cuirasse et la coque. Pull-up 10kΩ
+    insuffisante (front montant trop lent). 100Ω fournit ~50 mA, suffisant pour
+    charger/decharger la capacitance parasite a 20 kHz. Valide en Phase 1.
+    Le signal est inverse (GPIO HIGH → Drain a GND, GPIO LOW → Drain a 5V)
+    mais sans impact sur la detection par comptage de fronts.
 
 ---
 
@@ -745,7 +747,7 @@ Fil de corps :          Pico :                    Connecte a :
 | Phase 0.2 | Multi-frequences sur meme carte (Mega)        | TERMINE     |
 | Phase 0.3 | Detection sans GND commun (Mega → Pico W)     | TERMINE     |
 | Phase 0.4 | Detection Pico → Pico (sans Mega)             | TERMINE     |
-| Phase 1   | Detection via fil de corps + fleuret           | EN COURS — bloque par charge capacitive cuirasse, buffer necessaire |
+| Phase 1   | Detection via fil de corps + fleuret           | EN COURS — buffer MOSFET valide, detection cuirasse OK, reste bouton + multi-freq |
 | Phase 2   | Systeme complet sur Pico W                     | A faire     |
 | Phase 3   | Communication WiFi UDP                         | A faire     |
 | Phase 4   | Logique d'arbitrage                            | A faire     |
