@@ -15,6 +15,10 @@
 		{
 			"name": "phase1_5_button_detect",
 			"path": "./phase1_5_button_detect"
+		},
+		{
+			"name": "phase1_6_button_dc",
+			"path": "./phase1_6_button_dc"
 		}
 	],
 	"settings": {

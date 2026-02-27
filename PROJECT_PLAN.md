@@ -141,6 +141,87 @@ la capacite parasite interne B↔C du fleuret.
 
 Voir la section "Architecture par Tireur" pour les details.
 
+### Signal 5V sur GP16 : crash du Pico (Phase 1.7)
+
+**Probleme** : Quand GP16 (INPUT_PULLUP) est connecte a la ligne C et que la
+pointe du fleuret touche la cuirasse alimentee (5V/20kHz via MOSFET), le signal
+remonte par le chemin : cuirasse → pointe → ligne B → bouton ferme → ligne C → GP16.
+Le signal 5V depasse la tolerance de 3.3V du GPIO, provoquant un **latch-up** et
+un reset du Pico. Le crash est progressif : il survient quand le contact devient
+franc et que le courant augmente.
+
+**Solution** : Resistance serie **10kΩ** entre la ligne C et GP16. Limite le courant
+a 0.5 mA max (5V / 10kΩ), ce que les diodes de protection internes supportent.
+La lecture DC du bouton fonctionne toujours :
+- Bouton ferme : 3.3V × 10k / (50k + 10k + 10k) ≈ 0.47V → LOW ✅
+- Bouton presse : 3.3V × 50k / (50k + 10k) ≈ 2.75V → HIGH ✅
+
+**Valide en Phase 1.7** : plus de crash avec la resistance serie.
+
+### Attenuation du signal AC dans le fleuret : DECOUVERTE CRITIQUE (Phase 1.7)
+
+**Probleme** : Le signal 20 kHz genere sur la cuirasse (5V via MOSFET buffer)
+est **massivement attenue** en traversant le fil interne du fleuret. Au lieu de
+20 kHz, GP2 ne detecte que ~1700 Hz. Meme a 5 kHz, le signal est attenue a
+~500-1700 Hz.
+
+**Tests de diagnostic** :
+
+| Configuration                              | Frequence detectee |
+|--------------------------------------------|--------------------|
+| Fil direct (sans fleuret, sans cuirasse)   | 20 000 Hz exact ✅ |
+| Fil de corps seul (sans fleuret)           | 20 000 Hz ✅       |
+| Fleuret branche, pointe touche cuirasse    | ~1 700 Hz ❌       |
+| Fleuret branche, 5 kHz sur cuirasse        | ~500-1 700 Hz ❌   |
+
+Le fil de corps seul transmet parfaitement. C'est le **fil interne du fleuret**
+(~90 cm dans la rainure de la lame) qui attenue le signal.
+
+**Cause** : Le fil interne du fleuret court a ~1 mm de la lame metallique sur
+toute sa longueur, formant un **condensateur parasite** estime a ~10 nF.
+Ce condensateur shunt le signal AC vers la lame (ligne C / masse de l'arme)
+avant qu'il n'atteigne le connecteur (ligne B).
+
+A 20 kHz, l'impedance de 10 nF est : Zc = 1/(2π × 20000 × 10nF) ≈ **800Ω**
+→ la majorite du signal est court-circuitee vers la lame.
+
+A 1 kHz, l'impedance serait : Zc = 1/(2π × 1000 × 10nF) ≈ **16 kΩ**
+→ beaucoup moins de fuite, le signal devrait passer.
+
+**Implication** : Les frequences de 20-40 kHz sont **trop elevees** pour
+traverser le fil interne du fleuret. Le systeme filaire classique (FIE)
+fonctionne en DC (circuit normalement ferme, detection par rupture) et n'a
+pas ce probleme. Notre approche par detection de frequence AC doit utiliser
+des **frequences beaucoup plus basses** (1-3 kHz) pour que l'impedance du
+condensateur parasite soit suffisamment elevee.
+
+**Consequences** :
+- Les frequences 20/25/40 kHz doivent etre **revues a la baisse**
+- Les nouvelles frequences doivent rester suffisamment espacees pour la
+  classification par plage de tolerance
+- Le PWM hardware du RP2040 supporte ces frequences basses sans probleme
+  (wrap plus grand)
+- La fenetre de mesure de 50 ms reste adaptee (50 fronts a 1 kHz = suffisant)
+- A valider experimentalement : tester 1 kHz, 2 kHz, 3 kHz a travers le fleuret
+
+**Frequences candidates (a valider)** :
+
+| Frequence | Usage | PWM wrap (125 MHz) | Impedance Zc (10nF) |
+|-----------|-------|---------------------|----------------------|
+| 1 kHz     | Freq_NEUTRE          | 125 000 | 16 kΩ |
+| 1.5 kHz   | Freq_VALID_A         | 83 333  | 10.6 kΩ |
+| 2.5 kHz   | Freq_VALID_B         | 50 000  | 6.4 kΩ |
+
+Ou :
+
+| Frequence | Usage | PWM wrap (125 MHz) | Impedance Zc (10nF) |
+|-----------|-------|---------------------|----------------------|
+| 2 kHz     | Freq_NEUTRE          | 62 500  | 8 kΩ |
+| 3 kHz     | Freq_VALID_A         | 41 667  | 5.3 kΩ |
+| 4 kHz     | Freq_VALID_B         | 31 250  | 4 kΩ |
+
+Les frequences exactes seront determinees apres les tests experimentaux.
+
 ### Generation de signal sur Pico W : PWM hardware (pas tone())
 
 `tone()` sur le Pico W (framework Earlephilhower) est imprecis aux hautes frequences
@@ -169,7 +250,12 @@ Classification par plage de tolerance (±2 kHz).
 
 ### Frequences exactes
 
-Les frequences doivent etre exactes sur les deux plateformes :
+> **ATTENTION** : Les frequences 20/25/40 kHz ci-dessous sont les valeurs initiales,
+> validees en Phase 0 (fil direct et fil de corps). Elles sont **trop elevees** pour
+> traverser le fil interne du fleuret (attenuation massive, voir section "Attenuation
+> du signal AC dans le fleuret"). De nouvelles frequences dans la plage 1-3 kHz
+> doivent etre validees experimentalement (Phase 1.7bis). Le tableau ci-dessous
+> reste comme reference historique.
 
 | Frequence | Usage | Mega (prescaler 8) | Pico W (PWM hardware) |
 |-----------|-------|---------------------|-----------------------|
@@ -279,7 +365,7 @@ elle sert uniquement a detecter l'etat du bouton par lecture DC.
 **GP14 — Generation Freq_VALID (ligne A / rouge) — SORTIE PWM**
 - Genere un signal carre a Freq_VALID (unique par tireur) sur la ligne A
 - La ligne A est connectee a la cuirasse du tireur (via MOSFET buffer)
-- Freq_VALID_A = 25 kHz, Freq_VALID_B = 40 kHz
+- Freq_VALID_A = 25 kHz, Freq_VALID_B = 40 kHz (valeurs initiales, a revoir → ~1-3 kHz)
 - But : identifier une touche sur la surface valable de CE tireur
 
 **GP2 — Detection frequence (ligne B / bleu) — ENTREE GPIO (interruption)**
@@ -287,7 +373,7 @@ elle sert uniquement a detecter l'etat du bouton par lecture DC.
 - N'est analyse que QUAND le bouton est presse (GP16)
 - Comptage d'impulsions par interruption (RISING) sur une fenetre de 50 ms
 - Pull-down 10kΩ entre GP2 et GND (indispensable sans GND commun)
-- Classification par plage de frequence (±2 kHz) :
+- Classification par plage de frequence (±2 kHz avec 20-40 kHz, tolerance a reajuster avec nouvelles frequences) :
   - Freq_VALID adverse → touche valide
   - Aucune frequence → touche non-valide (blanche)
 
@@ -526,13 +612,18 @@ TIREUR A                                          TIREUR B
 
 ### Frequences
 
-- **Freq_VALID_A** (25 kHz) : frequence unique du tireur A, generee sur
+> **NOTE** : Les valeurs 20/25/40 kHz ci-dessous sont les frequences initiales.
+> Elles doivent etre **abaissees a ~1-3 kHz** suite a la decouverte de l'attenuation
+> par le fil interne du fleuret (Phase 1.7). Nouvelles valeurs a determiner
+> experimentalement en Phase 1.7bis.
+
+- **Freq_VALID_A** (25 kHz → a revoir) : frequence unique du tireur A, generee sur
   sa cuirasse (ligne A). Si le fleuret de B detecte cette frequence,
   c'est une touche valide de B sur A.
-- **Freq_VALID_B** (40 kHz) : frequence unique du tireur B, generee sur
+- **Freq_VALID_B** (40 kHz → a revoir) : frequence unique du tireur B, generee sur
   sa cuirasse (ligne A). Si le fleuret de A detecte cette frequence,
   c'est une touche valide de A sur B.
-- **Freq_NEUTRE** (20 kHz) : frequence reservee pour les surfaces neutres.
+- **Freq_NEUTRE** (20 kHz → a revoir) : frequence reservee pour les surfaces neutres.
   Non emise en Mode Simple. En Mode Time-Division, emise sur la coque (ligne C) par
   time-division (90% du temps). Sera aussi utilisee sur la piste metallique
   (quand disponible).
@@ -704,13 +795,24 @@ PWM hardware pour la generation de signal, buffer MOSFET 2N7000 + pull-up 100Ω.
          (Mode Simple), detection du bouton par lecture DC sur la ligne C.
          Voir section "Couplage parasite B↔C" et "Architecture par Tireur".
          **Code** : `phase1_5_button_detect/` (code du test RC, obsolete)
-- **1.6** : Tester la detection du bouton par lecture DC sur GP16 (Mode Simple) — A faire
+- **1.6** : Tester la detection du bouton par lecture DC sur GP16 (Mode Simple) — **TERMINE** ✅
          GP16 en INPUT_PULLUP connecte a la ligne C. Pas d'emission sur C.
          Bouton ferme → GP16 tire vers LOW (via pull-down 10kΩ de GP2 sur B).
          Bouton presse → GP16 tire vers HIGH (pull-up interne).
-- **1.7** : Tester la detection de frequence propre sur GP2 (sans emission sur C) — A faire
+         **Resultat** : transitions propres, detection fiable. Valide.
+         **Code** : `phase1_6_button_dc/`
+- **1.7** : Tester la detection de frequence propre sur GP2 (sans emission sur C) — **PARTIELLEMENT TERMINE**
          Verifier que GP2 ne voit aucun signal au repos (pas de couplage parasite)
          et detecte correctement Freq_VALID quand la pointe touche la cuirasse.
+         **Decouvertes** :
+         - GP16 crash avec signal 5V → resolu par resistance serie 10kΩ ✅
+         - Avalanche d'interruptions au repos (20k ISR/s) → resolu par detachInterrupt ✅
+         - **Signal AC massivement attenue par le fil interne du fleuret** → 20 kHz reduit a ~1700 Hz ❌
+         - Les frequences 20-40 kHz sont trop elevees → doivent etre abaissees a 1-3 kHz
+         Voir sections "Signal 5V sur GP16" et "Attenuation du signal AC dans le fleuret".
+- **1.7bis** : Tester des frequences basses (1-3 kHz) a travers le fleuret — A faire
+         Valider experimentalement quelle plage de frequences traverse le fil interne
+         du fleuret avec suffisamment d'amplitude pour etre detectee.
 - **1.8** : Connecter Freq_VALID sur la cuirasse (ligne A via MOSFET buffer)
          et verifier la boucle complete : bouton presse → detection freq → classification — A faire
 
@@ -810,14 +912,16 @@ est detecte par lecture DC, et Freq_VALID est identifiee a travers le fil de cor
 
 | Risque                                    | Impact    | Mitigation                                          |
 |-------------------------------------------|-----------|-----------------------------------------------------|
-| Signal trop attenue a travers le lame     | Bloquant  | Augmenter amplitude (ampli-op) ou baisser frequence |
+| Signal trop attenue a travers la lame     | **CONFIRME** | Le fil interne du fleuret forme un condensateur parasite (~10 nF) qui shunt le signal AC vers la lame. A 20 kHz, Zc ≈ 800Ω → signal massivement attenue. **Solution : baisser les frequences a 1-3 kHz** (Zc ≈ 8-16 kΩ). A valider en Phase 1.7bis. Augmenter l'amplitude ne resout pas le probleme (le signal est perdu dans le fleuret, pas a la source). |
 | GPIO ne peut pas driver la cuirasse (charge capacitive) | **RESOLU** | Buffer 2N7000 + pull-up 100Ω vers VBUS 5V — valide en Phase 1 |
 | Couplage capacitif parasite B↔C dans le fleuret | **RESOLU** | Ne pas emettre sur C et detecter sur B en meme temps. Mode Simple : pas d'emission sur C. Mode Time-Division : time-division avec bascule en full detect quand bouton presse. Decouvert en Phase 1.5. |
 | Bruit electrique parasite                 | Moyen     | Comptage par interruption est robuste au bruit       |
 | Latence WiFi trop elevee                  | Moyen     | UDP brut sans overhead HTTP ; mesurer en Phase 3     |
-| Interference entre les 2 frequences       | Moyen     | Frequences suffisamment espacees (20/25/40 kHz)     |
+| Interference entre les 2 frequences       | Moyen     | Frequences suffisamment espacees (a revalider avec nouvelles frequences basses) |
 | Signal trop faible pour declencher interruption | **RESOLU** | Pull-down 10kΩ sur le pin recepteur (valide en Phase 0.4) |
-| Detection bouton par DC : niveaux de tension insuffisants | Moyen | Pull-up interne (50kΩ) vs pull-down externe (10kΩ) donne 0.55V (LOW) vs 3.3V (HIGH). A valider en Phase 1.6. Si insuffisant : pull-up externe ou ADC. |
+| Detection bouton par DC : niveaux de tension insuffisants | **RESOLU** | Pull-up interne (50kΩ) vs pull-down externe (10kΩ) donne 0.55V (LOW) vs 3.3V (HIGH). **Valide en Phase 1.6** : transitions propres, detection fiable. |
+| Signal 5V sur GP16 provoque crash/latch-up du Pico | **RESOLU** | Quand la pointe touche la cuirasse (5V via MOSFET), le signal remonte via B → bouton → C → GP16. **Solution : resistance serie 10kΩ** sur GP16 (limite le courant a 0.5 mA). Valide en Phase 1.7. |
+| Avalanche d'interruptions au repos (20k ISR/s) | **RESOLU** | Au repos (bouton ferme, B↔C connectes), le signal 20 kHz atteint GP2 via le fil de corps → saturation CPU → watchdog reset. **Solution : detachInterrupt quand bouton non presse**, attachInterrupt uniquement quand bouton presse. |
 
 ---
 
@@ -859,6 +963,20 @@ est detecte par lecture DC, et Freq_VALID est identifiee a travers le fil de cor
     parasite entre les lignes B et C a l'interieur du fleuret rend impossible
     l'emission sur C et la detection sur B en meme temps. Decouvert en Phase 1.5.
     Solution : Mode Simple (pas d'emission sur C) ou Mode Time-Division (time-division).
+13. **Protection GP16 par resistance serie 10kΩ** : quand la pointe touche la cuirasse
+    (5V via MOSFET), le signal remonte jusqu'a GP16 via le bouton ferme. Le 5V depasse
+    la tolerance 3.3V du GPIO. La resistance serie 10kΩ limite le courant a 0.5 mA,
+    ce que les diodes de protection internes supportent. La lecture DC du bouton
+    fonctionne toujours (0.47V LOW / 2.75V HIGH). Decouvert et resolu en Phase 1.7.
+14. **Gestion des interruptions par etat du bouton** : au repos (bouton ferme),
+    le signal AC atteint GP2 via le fil de corps → 20k ISR/s → crash. Solution :
+    detachInterrupt quand bouton non presse, attachInterrupt uniquement quand
+    bouton presse. Decouvert et resolu en Phase 1.7.
+15. **Frequences a abaisser de 20-40 kHz vers 1-3 kHz** : le fil interne du fleuret
+    (~90 cm dans la rainure de la lame) forme un condensateur parasite ~10 nF avec
+    la lame metallique. A 20 kHz, Zc ≈ 800Ω → signal massivement attenue. A 1 kHz,
+    Zc ≈ 16 kΩ → beaucoup moins de fuite. Nouvelles frequences a valider
+    experimentalement en Phase 1.7bis. Decouvert en Phase 1.7.
 
 ---
 
@@ -977,7 +1095,7 @@ Mode Time-Division : GP14=PWM, GP2=interrupt in, GP16=digitalRead in, GP15=commu
 | Phase 0.2 | Multi-frequences sur meme carte (Mega)        | TERMINE     |
 | Phase 0.3 | Detection sans GND commun (Mega → Pico W)     | TERMINE     |
 | Phase 0.4 | Detection Pico → Pico (sans Mega)             | TERMINE     |
-| Phase 1   | Detection via fil de corps + fleuret           | EN COURS — buffer MOSFET valide, detection cuirasse OK, couplage parasite B↔C decouvert, architecture revue (Mode Simple / Mode Time-Division), reste detection bouton DC + freq propre |
+| Phase 1   | Detection via fil de corps + fleuret           | EN COURS — buffer MOSFET valide ✅, detection cuirasse OK ✅, couplage B↔C decouvert ✅, architecture revue ✅, detection bouton DC validee (1.6) ✅, crash GP16 resolu (1.7) ✅, avalanche ISR resolue (1.7) ✅, **BLOQUANT : attenuation AC dans fleuret → frequences 20-40 kHz trop elevees, a baisser vers 1-3 kHz (1.7bis)** |
 | Phase 2   | Systeme complet sur Pico W (Mode Simple → Time-Division) | A faire     |
 | Phase 3   | Communication WiFi UDP                         | A faire     |
 | Phase 4   | Logique d'arbitrage                            | A faire     |

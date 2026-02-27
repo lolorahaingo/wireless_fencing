@@ -31,7 +31,7 @@
 const uint PIN_SIGNAL_OUT = 15;
 
 // --- Fréquences disponibles ---
-const unsigned int FREQ_NEUTRE  = 20000;  // 20 kHz — exact
+const unsigned int FREQ_NEUTRE  = 1000;  // 20 kHz — exact
 const unsigned int FREQ_VALID_A = 25000;  // 25 kHz — exact
 const unsigned int FREQ_VALID_B = 40000;  // 40 kHz — exact
 
